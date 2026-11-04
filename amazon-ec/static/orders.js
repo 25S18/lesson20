@@ -13,6 +13,7 @@ function fetchOrders() {
         .then(orders => {
             const orderItemsTbody = document.getElementById("order-items");
             orderItemsTbody.innerHTML = "";
+
             if (!orders || orders.length === 0) {
                 orderItemsTbody.innerHTML = `
                     <tr>
@@ -21,6 +22,7 @@ function fetchOrders() {
                 `;
                 return;
             }
+
             orders.forEach(item => {
                 const subtotal = item.price * item.quantity;
                 const row = document.createElement("tr");

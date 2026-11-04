@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -31,8 +32,8 @@ type OrderResponse struct {
 }
 
 type PaymentRequest struct {
-	Amount int    `json:"amount"`
-	Method string `json:"method"`
+	OrderIDs []int  `json:"order_ids"`
+	Method   string `json:"method"`
 }
 
 var db *sql.DB
@@ -44,6 +45,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer db.Close()
+	db.SetMaxOpenConns(1)
 
 	initDB()
 
@@ -91,6 +93,7 @@ func initDB() {
 	createPaymentsTable := `
 	CREATE TABLE IF NOT EXISTS payments (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
 		amount INTEGER NOT NULL,
 		method TEXT NOT NULL,
 		status TEXT NOT NULL,
@@ -101,6 +104,11 @@ func initDB() {
 		log.Fatal("Failed to create payments table:", err)
 	}
 
+	// 古いpaymentsテーブルを自動削除・変更しない。
+	var columnCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('payments') WHERE name = 'order_id'").Scan(&columnCount); err != nil || columnCount != 1 {
+		log.Fatal("paymentsテーブルにorder_idがありません。ec.dbをバックアップし、移行手順を確認してください")
+	}
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM products").Scan(&count)
 	if err == nil && count == 0 {
@@ -138,6 +146,7 @@ func getProductsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		products = append(products, p)
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(products)
 }
@@ -157,6 +166,7 @@ func getProductDetailHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid id parameter", http.StatusBadRequest)
 		return
 	}
+
 	var p Product
 	err = db.QueryRow("SELECT id, name, price FROM products WHERE id = ?", id).Scan(&p.ID, &p.Name, &p.Price)
 	if err != nil {
@@ -167,6 +177,7 @@ func getProductDetailHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(p)
 }
@@ -188,10 +199,12 @@ func createOrderHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid input", http.StatusBadRequest)
 		return
 	}
+
 	if req.ProductID <= 0 || req.Quantity <= 0 {
 		http.Error(w, "Invalid product_id or quantity", http.StatusBadRequest)
 		return
 	}
+
 	stmt, err := db.Prepare("INSERT INTO orders (product_id, quantity) VALUES (?, ?)")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -199,14 +212,20 @@ func createOrderHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer stmt.Close()
 
-	_, err = stmt.Exec(req.ProductID, req.Quantity)
+	result, err := stmt.Exec(req.ProductID, req.Quantity)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"message": "注文しました"})
+	id, err := result.LastInsertId()
+	if err != nil {
+		http.Error(w, "注文ID取得失敗", 500)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"id": id, "message": "注文しました"})
 }
 
 func getOrdersHandler(w http.ResponseWriter, r *http.Request) {
@@ -232,34 +251,67 @@ func getOrdersHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		orders = append(orders, o)
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(orders)
 }
 
 func createPaymentHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", 405)
 		return
 	}
 	var req PaymentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid input", http.StatusBadRequest)
+		http.Error(w, "Invalid input", 400)
 		return
 	}
-	if req.Amount <= 0 || (req.Method != "credit" && req.Method != "bank" && req.Method != "cod") {
-		http.Error(w, "Invalid payment parameters", http.StatusBadRequest)
+	if len(req.OrderIDs) == 0 || (req.Method != "credit" && req.Method != "bank" && req.Method != "cod") {
+		http.Error(w, "Invalid payment parameters", 400)
 		return
 	}
-	stmt, err := db.Prepare("INSERT INTO payments (amount, method, status) VALUES (?, ?, ?)")
+	seen := map[int]bool{}
+	for _, id := range req.OrderIDs {
+		if id <= 0 || seen[id] {
+			http.Error(w, "Invalid order IDs", 400)
+			return
+		}
+		seen[id] = true
+	}
+	tx, err := db.Begin()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Transaction error", 500)
 		return
 	}
-	defer stmt.Close()
-
-	_, err = stmt.Exec(req.Amount, req.Method, "paid")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	defer tx.Rollback()
+	for _, id := range req.OrderIDs {
+		var amount int64
+		err := tx.QueryRow(`SELECT CAST(products.price AS INTEGER) * CAST(orders.quantity AS INTEGER)
+   FROM orders JOIN products ON orders.product_id = products.id WHERE orders.id = ?`, id).Scan(&amount)
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "Order not found", 404)
+			return
+		}
+		if err != nil || amount <= 0 {
+			http.Error(w, "Invalid order amount", 400)
+			return
+		}
+		var count int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM payments WHERE order_id = ?", id).Scan(&count); err != nil {
+			http.Error(w, "Payment check failed", 500)
+			return
+		}
+		if count != 0 {
+			http.Error(w, "Already paid", 409)
+			return
+		}
+		if _, err := tx.Exec("INSERT INTO payments (order_id, amount, method, status) VALUES (?, ?, ?, 'paid')", id, amount, req.Method); err != nil {
+			http.Error(w, "Payment insert failed", 500)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "Payment commit failed", 500)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

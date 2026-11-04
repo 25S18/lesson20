@@ -11,6 +11,7 @@ function displayCart() {
     const cartItemsTbody = document.getElementById("cart-items");
     const cartTotalHeader = document.getElementById("cart-total");
     cartItemsTbody.innerHTML = "";
+
     if (cart.length === 0) {
         cartItemsTbody.innerHTML = `
             <tr>
@@ -20,6 +21,7 @@ function displayCart() {
         cartTotalHeader.innerText = "合計: ¥0";
         return;
     }
+
     let total = 0;
     cart.forEach(item => {
         const subtotal = item.price * item.quantity;
@@ -33,6 +35,7 @@ function displayCart() {
         `;
         cartItemsTbody.appendChild(row);
     });
+
     cartTotalHeader.innerText = `合計: ¥${total.toLocaleString()}`;
 }
 
@@ -42,32 +45,34 @@ async function checkoutCart() {
         alert("カートが空です。");
         return;
     }
-    let totalAmount = 0;
-    for (const item of cart) {
-        totalAmount += item.price * item.quantity;
-    }
+
+    const checkoutBtn = document.getElementById("checkout-btn");
+    checkoutBtn.disabled = true;
+    const orderIds = [];
     try {
         for (const item of cart) {
-            const payload = {
-                product_id: item.id,
-                quantity: item.quantity
-            };
             const response = await fetch("/api/orders", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify(payload)
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({product_id: item.id, quantity: item.quantity})
             });
-            if (!response.ok) {
-                throw new Error("一部の商品の注文処理に失敗しました。");
-            }
+            if (!response.ok) throw new Error("注文登録に失敗しました。");
+            const data = await response.json();
+            if (!Number.isSafeInteger(data.id) || data.id <= 0) throw new Error("注文ID取得失敗");
+            orderIds.push(data.id);
         }
-        localStorage.removeItem("cart");
-        window.location.href = `payment.html?amount=${totalAmount}`;
+        // 決済完了までカートは消さない
+        window.location.href = `payment.html?orders=${orderIds.join(",")}&cart=1`;
     } catch (error) {
         console.error(error);
-        alert("注文処理中にエラーが発生しました。");
+        // 登録済みの注文を再登録しないよう、成功分は決済画面へ進む
+        if (orderIds.length > 0) {
+            alert("一部の注文だけ登録されました。登録済みの注文を決済します。");
+            window.location.href = `payment.html?orders=${orderIds.join(",")}&cart=1`;
+        } else {
+            alert("注文処理中にエラーが発生しました。");
+            checkoutBtn.disabled = false;
+        }
     }
 }
 

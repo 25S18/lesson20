@@ -107,12 +107,8 @@ function orderDetailProduct(productId) {
         return response.json();
     })
     .then(data => {
-        const msgDiv = document.getElementById("message");
-        msgDiv.innerText = data.message;
-        msgDiv.style.display = "block";
-        setTimeout(() => {
-            msgDiv.style.display = "none";
-        }, 3000);
+        if (!Number.isSafeInteger(data.id) || data.id <= 0) throw new Error("注文IDを取得できませんでした。");
+        window.location.href = `payment.html?orders=${data.id}`;
     })
     .catch(error => {
         console.error(error);

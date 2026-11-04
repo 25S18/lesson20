@@ -8,12 +8,10 @@ function fetchProducts() {
         .then(products => {
             const listDiv = document.getElementById("product-list");
             listDiv.innerHTML = "";
-
             if (products.length === 0) {
                 listDiv.innerHTML = "<p>商品がありません。</p>";
                 return;
             }
-
             products.forEach(product => {
                 const card = document.createElement("div");
                 card.className = "product-card";
@@ -40,17 +38,14 @@ function fetchProducts() {
 function orderProduct(productId) {
     const qtyInput = document.getElementById(`qty-${productId}`);
     const quantity = parseInt(qtyInput.value, 10);
-
     if (isNaN(quantity) || quantity <= 0) {
         alert("正当な数量を入力してください。");
         return;
     }
-
     const payload = {
         product_id: productId,
         quantity: quantity
     };
-
     fetch("/api/orders", {
         method: "POST",
         headers: {
@@ -65,12 +60,8 @@ function orderProduct(productId) {
         return response.json();
     })
     .then(data => {
-        const msgDiv = document.getElementById("message");
-        msgDiv.innerText = data.message;
-        msgDiv.style.display = "block";
-        setTimeout(() => {
-            msgDiv.style.display = "none";
-        }, 3000);
+        if (!Number.isSafeInteger(data.id) || data.id <= 0) throw new Error("注文IDを取得できませんでした。");
+        window.location.href = `payment.html?orders=${data.id}`;
     })
     .catch(error => {
         console.error("Error creating order:", error);
